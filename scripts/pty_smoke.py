@@ -84,6 +84,12 @@ def session(board, quit_key, exercise):
             wait_for(lambda: json.loads(board.read_text())["cards"][0]["archived"])
             send(b"va")
             wait_for(lambda: not json.loads(board.read_text())["cards"][0]["archived"])
+            send(b"NBlocked\r")
+            wait_for(lambda: "Blocked" in json.loads(board.read_text())["columns"])
+            send(b"E\x1b[F!\r")
+            wait_for(lambda: "Blocked!" in json.loads(board.read_text())["columns"])
+            send(b"[s")
+            wait_for(lambda: json.loads(board.read_text()).get("stacked_columns") == ["Blocked!"])
             send(b"v?")
             send(b"\x1b")
             # Resize exercises the compact editor and minimum-size rendering.

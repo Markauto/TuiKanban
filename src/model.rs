@@ -77,6 +77,9 @@ pub struct Board {
     pub version: u32,
     pub name: String,
     pub columns: Vec<String>,
+    /// Columns placed below their predecessor instead of in a new horizontal lane.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stacked_columns: Vec<String>,
     pub next_id: u64,
     pub cards: Vec<Card>,
 }
@@ -86,6 +89,7 @@ impl Board {
             version: 1,
             name,
             columns,
+            stacked_columns: vec![],
             next_id: 1,
             cards: vec![],
         };
@@ -110,6 +114,18 @@ impl Board {
                 columns.insert(column.to_lowercase()),
                 "Duplicate column: {column}"
             );
+        }
+        let mut stacked = HashSet::new();
+        for name in &self.stacked_columns {
+            ensure!(
+                self.columns.contains(name),
+                "Stack references missing column {name}"
+            );
+            ensure!(
+                self.columns.first() != Some(name),
+                "The first column cannot be stacked"
+            );
+            ensure!(stacked.insert(name), "Duplicate stacked column: {name}");
         }
         let mut ids = HashSet::new();
         for card in &self.cards {
@@ -198,6 +214,80 @@ impl Board {
         card.touch();
         Ok(())
     }
+    pub fn add_column(&mut self, name: &str) -> Result<()> {
+        let name = name.trim();
+        self.check_column_name(name, None)?;
+        self.columns.push(name.into());
+        Ok(())
+    }
+    fn check_column_name(&self, name: &str, old: Option<&str>) -> Result<()> {
+        valid_text(name, "Column name")?;
+        ensure!(
+            !self
+                .columns
+                .iter()
+                .any(|c| Some(c.as_str()) != old && c.to_lowercase() == name.to_lowercase()),
+            "Duplicate column: {name}"
+        );
+        Ok(())
+    }
+    pub fn rename_column(&mut self, name: &str, new_name: &str) -> Result<()> {
+        let old = self.column(name)?;
+        let new = new_name.trim();
+        self.check_column_name(new, Some(&old))?;
+        for column in self
+            .columns
+            .iter_mut()
+            .chain(self.stacked_columns.iter_mut())
+        {
+            if *column == old {
+                *column = new.into();
+            }
+        }
+        for card in self.cards.iter_mut().filter(|c| c.column == old) {
+            card.column = new.into();
+            card.touch();
+        }
+        Ok(())
+    }
+    pub fn order_column(&mut self, name: &str, position: usize) -> Result<()> {
+        ensure!(
+            (1..=self.columns.len()).contains(&position),
+            "Position must be between 1 and {}",
+            self.columns.len()
+        );
+        let name = self.column(name)?;
+        self.columns.retain(|c| c != &name);
+        self.columns.insert(position - 1, name);
+        self.normalize_stacks();
+        Ok(())
+    }
+    pub fn stack_column(&mut self, name: &str, stacked: bool) -> Result<()> {
+        let name = self.column(name)?;
+        ensure!(
+            !stacked || self.columns.first() != Some(&name),
+            "The first column cannot be stacked"
+        );
+        self.stacked_columns.retain(|c| c != &name);
+        if stacked {
+            self.stacked_columns.push(name);
+        }
+        Ok(())
+    }
+    fn normalize_stacks(&mut self) {
+        self.stacked_columns
+            .retain(|c| self.columns.contains(c) && self.columns.first() != Some(c));
+    }
+    pub fn column_stacks(&self) -> Vec<Vec<usize>> {
+        let mut stacks: Vec<Vec<usize>> = Vec::new();
+        for (index, name) in self.columns.iter().enumerate() {
+            if index == 0 || !self.stacked_columns.contains(name) {
+                stacks.push(Vec::new());
+            }
+            stacks.last_mut().unwrap().push(index);
+        }
+        stacks
+    }
     pub fn remove_column(&mut self, name: &str, destination: Option<&str>) -> Result<()> {
         ensure!(self.columns.len() > 1, "Cannot remove the last column");
         let name = self.column(name)?;
@@ -214,6 +304,7 @@ impl Board {
             card.touch();
         }
         self.columns.retain(|c| c != &name);
+        self.normalize_stacks();
         Ok(())
     }
 }

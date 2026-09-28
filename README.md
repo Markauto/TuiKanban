@@ -59,6 +59,10 @@ release recipe. Supported package architectures: x86_64 and aarch64.
 | Arrow keys / `h j k l` | Navigate columns and cards |
 | `Home` / `End` | Select first / last card |
 | `n` / `e` | Create / edit a card |
+| `N` / `E` | Add / rename a column (Enter or Ctrl+S saves) |
+| `[` / `]` | Move selected column earlier / later |
+| `s` | Stack selected column below its predecessor / unstack |
+| `Tab` / `Shift+Tab` | Select next / previous column, including stacked columns |
 | `Enter` | View details; arrows scroll |
 | `H` / `L` | Move selected card left / right |
 | `p` | Cycle priority |
@@ -71,7 +75,7 @@ release recipe. Supported package architectures: x86_64 and aarch64.
 | `?` | Help (scroll with arrows) |
 | `q` / `Ctrl+C` | Quit |
 
-In text fields, Left/Right and Home/End move the cursor; Backspace/Delete remove characters. In the editor, use `Tab` / `Shift+Tab` to change fields, arrows or Space to change priority/column, `Enter` for a description newline, `Ctrl+S` to save, and `Esc` to cancel. Blank tags or due date clear that field. Columns page horizontally on smaller terminals. The TUI needs at least 30×10 cells; 100×30 or larger is recommended.
+In text fields, Left/Right and Home/End move the cursor; Backspace/Delete remove characters. In the editor, use `Tab` / `Shift+Tab` to change fields, arrows or Space to change priority/column, `Enter` for a description newline, `Ctrl+S` to save, and `Esc` to cancel. Blank tags or due date clear that field. Column lanes page horizontally on smaller terminals; tall stacks page vertically to keep the selection visible. The TUI needs at least 30×10 cells; 100×30 or larger is recommended.
 
 Changes save immediately. The TUI refreshes external changes automatically. If another session changes a card while its editor is open, saving reports a conflict; cancel and reopen to use the latest version.
 
@@ -95,6 +99,8 @@ kanban delete 1 --yes
 kanban column add Blocked
 kanban column rename Backlog Todo
 kanban column order Blocked 2
+kanban column stack Blocked    # below Todo in the same lane
+kanban column unstack Blocked # return to its own lane
 kanban column remove Blocked --move-to Todo
 kanban stats --json
 
@@ -106,6 +112,8 @@ kanban --file personal.json
 ```
 
 `--json` produces structured results for every data command. `export` always writes complete JSON to stdout. Errors go to stderr with a nonzero exit status. `list` defaults to active cards; `--archived` shows only archived cards and `--all` includes both. Priority sorts urgent first, and due-date sorting puts undated cards last. Overdue means before today's UTC date, independent of column name (archive completed work to omit it from active statistics).
+
+Stacking is saved with the board. A stacked column appears beneath its predecessor in column order; consecutive stacked columns share a lane. Reordering changes that predecessor. The first column cannot be stacked and is automatically unstacked after reordering or removal. Use `[` / `]` to place a column after the desired upper column, then `s` to stack it. Left/Right and Tab traverse columns in board order; Up/Down continue to select cards.
 
 Column names match without regard to case and must be unique. Removing a populated column requires `--move-to`, including when it contains archived cards. IDs are stable and never reused after deletion. Tags are comma-separated and deduplicated without regard to case. Card order in the TUI is creation order.
 
@@ -119,7 +127,7 @@ source kanban.bash
 
 ## Storage and backups
 
-The versioned JSON document contains the board name, ordered columns, next ID, and all active and archived cards. Import validates the complete document before changing the destination. Replacement requires `--force`. Export to a **different path** from your live board: shell redirection truncates its destination before the command runs.
+The versioned JSON document contains the board name, ordered columns, optional stacked columns, next ID, and all active and archived cards. Import validates the complete document before changing the destination. Replacement requires `--force`. Export to a **different path** from your live board: shell redirection truncates its destination before the command runs.
 
 Writes acquire a sibling `.lock` file, reload the latest board, validate it, and atomically replace it via a temporary file in the same directory. Lock files may remain on disk; locks are released by the operating system when the process exits. Keep the lock file in place while any session is running. Use a local filesystem with reliable file locking; distributed/network filesystems are not supported. Back up with `kanban export`; this app does not provide sync or automatic backup history.
 

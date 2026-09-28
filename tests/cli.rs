@@ -443,3 +443,86 @@ fn missing_home_requires_a_path_but_does_not_break_help_or_completions() {
         .assert()
         .success();
 }
+
+#[test]
+fn column_layout_survives_renames_ordering_and_round_trips() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("board.json");
+    init(&file);
+    json(&file, &["add", "Keep me", "--column", "In Progress"]);
+    json(&file, &["archive", "1"]);
+    cmd(&file)
+        .args(["column", "stack", "in progress"])
+        .assert()
+        .success();
+    cmd(&file)
+        .args(["column", "rename", "In Progress", "Working"])
+        .assert()
+        .success();
+    let exported = json(&file, &["export"]);
+    assert_eq!(exported["stacked_columns"], serde_json::json!(["Working"]));
+    assert_eq!(exported["cards"][0]["column"], "Working");
+    let before = std::fs::read(&file).unwrap();
+    for args in [
+        vec!["column", "stack", "Todo"],
+        vec!["column", "rename", "Working", "Todo"],
+        vec!["column", "add", "  "],
+    ] {
+        cmd(&file).args(args).assert().failure();
+        assert_eq!(std::fs::read(&file).unwrap(), before);
+    }
+    let copy = dir.path().join("copy.json");
+    cmd(&copy).arg("import").arg(&file).assert().success();
+    assert_eq!(json(&copy, &["export"]), exported);
+    cmd(&file)
+        .args(["column", "order", "Working", "1"])
+        .assert()
+        .success();
+    assert!(json(&file, &["export"]).get("stacked_columns").is_none());
+    cmd(&file)
+        .args(["column", "stack", "Todo"])
+        .assert()
+        .success();
+    cmd(&file)
+        .args(["column", "remove", "Working", "--move-to", "Todo"])
+        .assert()
+        .success();
+    assert!(json(&file, &["export"]).get("stacked_columns").is_none());
+    assert_eq!(json(&file, &["show", "1"])["column"], "Todo");
+    cmd(&file)
+        .args(["column", "stack", "Done"])
+        .assert()
+        .success();
+    cmd(&file)
+        .args(["column", "unstack", "Done"])
+        .assert()
+        .success();
+    assert!(json(&file, &["export"]).get("stacked_columns").is_none());
+}
+
+#[test]
+fn legacy_boards_load_and_invalid_stacks_are_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("board.json");
+    init(&file);
+    let mut board = json(&file, &["export"]);
+    assert!(board.get("stacked_columns").is_none());
+    cmd(&file).args(["list"]).assert().success();
+    let source = dir.path().join("bad.json");
+    let before = std::fs::read(&file).unwrap();
+    for stacks in [
+        serde_json::json!(["Missing"]),
+        serde_json::json!(["Todo"]),
+        serde_json::json!(["Done", "Done"]),
+    ] {
+        board["stacked_columns"] = stacks;
+        std::fs::write(&source, serde_json::to_vec(&board).unwrap()).unwrap();
+        cmd(&file)
+            .arg("import")
+            .arg(&source)
+            .arg("--force")
+            .assert()
+            .failure();
+        assert_eq!(std::fs::read(&file).unwrap(), before);
+    }
+}

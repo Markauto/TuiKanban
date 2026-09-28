@@ -24,7 +24,7 @@ use std::{
 const ACCENT: Color = Color::Cyan;
 const MUTED: Color = Color::DarkGray;
 const BG: Color = Color::Rgb(17, 23, 34);
-const HELP: &str = "NAVIGATE\n  ←/→ or h/l       Select column\n  ↑/↓ or j/k       Select card\n  Home / End       First / last card\n  Enter            View full card (↑/↓ scroll)\n\nCARDS\n  n                New card in selected column\n  e                Edit selected card\n  H / L            Move card left / right\n  p                Cycle priority\n  a                Archive / restore card\n  d                Delete with confirmation\n\nBOARD\n  /                Search ID, text and tags\n  Esc              Clear search / close dialog\n  v                Toggle active / archived cards\n  r                Reload from disk\n  ?                This help\n  q / Ctrl+C       Quit\n\nEDITOR\n  Tab / Shift+Tab  Change field\n  ←/→ or Space     Cycle priority / column\n  ←/→ Home/End     Move text cursor\n  Enter            New line in description\n  Ctrl+S           Save card\n  Esc              Cancel\n\nChanges save immediately. CLI changes refresh automatically.\nManage columns and export data with `kanban --help`.";
+const HELP: &str = "NAVIGATE\n  ←/→ or h/l       Select column\n  ↑/↓ or j/k       Select card\n  Home / End       First / last card\n  Enter            View full card (↑/↓ scroll)\n\nCARDS\n  n                New card in selected column\n  e                Edit selected card\n  H / L            Move card left / right\n  p                Cycle priority\n  a                Archive / restore card\n  d                Delete with confirmation\n\nCOLUMNS\n  N / E            Add / rename column\n  [ / ]            Reorder selected column\n  s                Stack below previous / unstack\n  Tab / Shift+Tab  Next / previous column\n\nBOARD\n  /                Search ID, text and tags\n  Esc              Clear search / close dialog\n  v                Toggle active / archived cards\n  r                Reload from disk\n  ?                This help\n  q / Ctrl+C       Quit\n\nEDITOR\n  Tab / Shift+Tab  Change field\n  ←/→ or Space     Cycle priority / column\n  ←/→ Home/End     Move text cursor\n  Enter            New line in description\n  Ctrl+S           Save card\n  Esc              Cancel\n\nChanges save immediately. CLI changes refresh automatically.\nExport data and remove columns with `kanban --help`.";
 
 struct TerminalGuard;
 impl Drop for TerminalGuard {
@@ -79,6 +79,10 @@ enum Mode {
     Detail(u16),
     Edit(Box<Draft>),
     Delete(u64),
+    Column {
+        original: Option<String>,
+        draft: Box<Draft>,
+    },
 }
 struct Draft {
     original: Option<Card>,
@@ -289,7 +293,9 @@ impl App {
             }
             Mode::Help(scroll) => match key.code {
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => Mode::Normal,
-                KeyCode::Down | KeyCode::Char('j') => Mode::Help(scroll.saturating_add(1).min(38)),
+                KeyCode::Down | KeyCode::Char('j') => {
+                    Mode::Help(scroll.saturating_add(1).min(HELP.lines().count() as u16))
+                }
                 KeyCode::Up | KeyCode::Char('k') => Mode::Help(scroll.saturating_sub(1)),
                 _ => Mode::Help(scroll),
             },
@@ -317,6 +323,43 @@ impl App {
                     Mode::Normal
                 } else {
                     Mode::Delete(id)
+                }
+            }
+            Mode::Column {
+                original,
+                mut draft,
+            } => {
+                if key.code == KeyCode::Esc {
+                    Mode::Normal
+                } else if key.code == KeyCode::Enter
+                    || (key.code == KeyCode::Char('s')
+                        && key.modifiers.contains(KeyModifiers::CONTROL))
+                {
+                    let name = draft.fields[0].trim().to_owned();
+                    match store.update(|b| match &original {
+                        Some(old) => b.rename_column(old, &name),
+                        None => b.add_column(&name),
+                    }) {
+                        Ok(()) => {
+                            self.refresh(store)?;
+                            self.column = self
+                                .board
+                                .columns
+                                .iter()
+                                .position(|c| c == &name)
+                                .unwrap_or(0);
+                            self.row = 0;
+                            self.status = format!("Saved column {name}");
+                            Mode::Normal
+                        }
+                        Err(e) => {
+                            draft.error = e.to_string();
+                            Mode::Column { original, draft }
+                        }
+                    }
+                } else {
+                    draft.input(key);
+                    Mode::Column { original, draft }
                 }
             }
             Mode::Edit(mut draft) => {
@@ -388,11 +431,45 @@ impl App {
     fn normal_key(&mut self, key: KeyEvent, store: &Store) -> Result<Mode> {
         let id = self.selected().map(|c| c.id);
         match key.code {
-            KeyCode::Left | KeyCode::Char('h') => {
+            KeyCode::Char('N') | KeyCode::Char('E') => {
+                let original = (key.code == KeyCode::Char('E'))
+                    .then(|| self.board.columns[self.column].clone());
+                let mut draft = Draft::new(String::new(), None);
+                draft.fields[0] = original.clone().unwrap_or_default();
+                draft.cursors[0] = draft.fields[0].len();
+                return Ok(Mode::Column {
+                    original,
+                    draft: Box::new(draft),
+                });
+            }
+            KeyCode::Char('s') => {
+                let name = self.board.columns[self.column].clone();
+                store.update(|b| b.stack_column(&name, !b.stacked_columns.contains(&name)))?;
+                self.refresh(store)?;
+                self.status = "Column layout saved".into();
+            }
+            KeyCode::Char('[') | KeyCode::Char(']') => {
+                let name = self.board.columns[self.column].clone();
+                let target = if key.code == KeyCode::Char('[') {
+                    self.column.saturating_sub(1)
+                } else {
+                    (self.column + 1).min(self.board.columns.len() - 1)
+                };
+                store.update(|b| b.order_column(&name, target + 1))?;
+                self.refresh(store)?;
+                self.column = self
+                    .board
+                    .columns
+                    .iter()
+                    .position(|c| c == &name)
+                    .unwrap_or(0);
+                self.status = "Column order saved".into();
+            }
+            KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
                 self.column = self.column.saturating_sub(1);
                 self.row = 0;
             }
-            KeyCode::Right | KeyCode::Char('l') => {
+            KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
                 self.column = (self.column + 1).min(self.board.columns.len() - 1);
                 self.row = 0;
             }
@@ -522,19 +599,8 @@ impl App {
             Paragraph::new(header).block(Block::default().borders(Borders::BOTTOM)),
             chunks[0],
         );
-        let visible = ((area.width / 28) as usize)
-            .max(1)
-            .min(self.board.columns.len());
-        let start = (self.column / visible) * visible;
-        let end = (start + visible).min(self.board.columns.len());
-        let cols = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints(vec![
-                Constraint::Ratio(1, (end - start) as u32);
-                end - start
-            ])
-            .split(chunks[1]);
-        for (offset, column) in (start..end).enumerate() {
+        let cells = column_cells(&self.board, self.column, chunks[1]);
+        for &(column, cell) in &cells {
             let cards = self.cards(column);
             let selected = column == self.column;
             let border = if selected { ACCENT } else { MUTED };
@@ -548,7 +614,7 @@ impl App {
                     Paragraph::new("\n  No cards here\n\n  n  Create a card")
                         .style(Style::default().fg(MUTED))
                         .block(block),
-                    cols[offset],
+                    cell,
                 );
             } else {
                 let items: Vec<_> = cards
@@ -603,7 +669,7 @@ impl App {
                 } else {
                     None
                 });
-                f.render_stateful_widget(list, cols[offset], &mut state);
+                f.render_stateful_widget(list, cell, &mut state);
             }
         }
         let search = if matches!(self.mode, Mode::Search) {
@@ -614,8 +680,8 @@ impl App {
             format!(
                 " {}  · columns {}–{}/{}",
                 clean(&self.status),
-                start + 1,
-                end,
+                cells.first().map_or(1, |(c, _)| c + 1),
+                cells.last().map_or(1, |(c, _)| c + 1),
                 self.board.columns.len()
             )
         };
@@ -625,7 +691,7 @@ impl App {
         );
         f.render_widget(
             Paragraph::new(
-                " ←↓↑→ navigate  n new  e edit  H/L move  a archive  / search  ? help  q quit",
+                " ←↓↑→ navigate  n/e cards  N/E columns  s stack  [/] reorder  ? help  q quit",
             )
             .style(Style::default().fg(Color::Gray))
             .wrap(Wrap { trim: true }),
@@ -639,9 +705,47 @@ impl App {
             },
             Mode::Delete(id) => popup(f, " Delete card ", &format!("Permanently delete card #{id}?\n\nThis cannot be undone.\n\ny Delete    n / Esc Cancel"), 56, 9, 0),
             Mode::Edit(draft) => draw_editor(f, draft),
+            Mode::Column { original, draft } => popup(f,
+                if original.is_some() { " Rename column " } else { " Add column " },
+                &format!("Name: {}\n\nEnter / Ctrl+S save · Esc cancel\n{}", draft.displayed(0), draft.error), 70, 8, 0),
             _ => {}
         }
     }
+}
+// Page whole lanes horizontally and long stacks vertically, keeping selection visible.
+fn column_cells(board: &Board, selected: usize, area: Rect) -> Vec<(usize, Rect)> {
+    let stacks = board.column_stacks();
+    let lane = stacks
+        .iter()
+        .position(|s| s.contains(&selected))
+        .unwrap_or(0);
+    let visible = (usize::from(area.width / 28)).max(1).min(stacks.len());
+    let start = lane / visible * visible;
+    let end = (start + visible).min(stacks.len());
+    let lanes = Layout::horizontal(vec![
+        Constraint::Ratio(1, (end - start) as u32);
+        end - start
+    ])
+    .split(area);
+    let mut cells = Vec::new();
+    for (offset, stack) in stacks[start..end].iter().enumerate() {
+        let rows = (usize::from(area.height / 6)).max(1).min(stack.len());
+        let selected_row = stack.iter().position(|c| *c == selected).unwrap_or(0);
+        let first = selected_row / rows * rows;
+        let last = (first + rows).min(stack.len());
+        let rects = Layout::vertical(vec![
+            Constraint::Ratio(1, (last - first) as u32);
+            last - first
+        ])
+        .split(lanes[offset]);
+        cells.extend(
+            stack[first..last]
+                .iter()
+                .copied()
+                .zip(rects.iter().copied()),
+        );
+    }
+    cells
 }
 fn clean(text: &str) -> String {
     text.chars()
@@ -800,6 +904,70 @@ mod tests {
         .unwrap()
     }
     #[test]
+    fn columns_can_be_created_renamed_reordered_and_stacked() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("board.json"));
+        store.init(board()).unwrap();
+        let mut app = App::new(store.read().unwrap());
+        let press = |app: &mut App, code| {
+            app.key(KeyEvent::new(code, KeyModifiers::NONE), &store)
+                .unwrap();
+        };
+        press(&mut app, KeyCode::Char('N'));
+        press(&mut app, KeyCode::Enter);
+        assert!(matches!(app.mode, Mode::Column { .. }));
+        for c in "Review λ".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.board.columns[app.column], "Review λ");
+        press(&mut app, KeyCode::Char('E'));
+        press(&mut app, KeyCode::End);
+        press(&mut app, KeyCode::Char('!'));
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('['));
+        press(&mut app, KeyCode::Char('s'));
+        let saved = store.read().unwrap();
+        assert_eq!(saved.columns, ["Todo", "Doing", "Review λ!", "Done"]);
+        assert_eq!(saved.stacked_columns, ["Review λ!"]);
+        press(&mut app, KeyCode::Char('s'));
+        assert!(store.read().unwrap().stacked_columns.is_empty());
+        press(&mut app, KeyCode::Char('N'));
+        press(&mut app, KeyCode::Char('x'));
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(store.read().unwrap().columns.len(), 4);
+    }
+    #[test]
+    fn stacked_columns_render_above_each_other_and_selection_stays_visible() {
+        let mut b = board();
+        b.stack_column("Doing", true).unwrap();
+        let cells = column_cells(&b, 1, Rect::new(0, 3, 100, 24));
+        assert_eq!(cells[0].1.x, cells[1].1.x);
+        assert!(cells[0].1.y < cells[1].1.y);
+        assert!(cells[2].1.x > cells[1].1.x);
+        b.stack_column("Done", true).unwrap();
+        for selected in 0..3 {
+            let cells = column_cells(&b, selected, Rect::new(0, 3, 30, 6));
+            assert_eq!(cells.len(), 1);
+            assert_eq!(cells[0].0, selected);
+        }
+        let app = App::new(b);
+        let mut terminal = Terminal::new(TestBackend::new(100, 35)).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let rows: Vec<String> = terminal
+            .backend()
+            .buffer()
+            .content
+            .chunks(100)
+            .map(|row| row.iter().map(|c| c.symbol()).collect())
+            .collect();
+        let positions: Vec<_> = ["Todo", "Doing", "Done"]
+            .iter()
+            .map(|name| rows.iter().position(|row| row.contains(name)).unwrap())
+            .collect();
+        assert!(positions[0] < positions[1] && positions[1] < positions[2]);
+    }
+    #[test]
     fn editor_cursor_handles_unicode_and_deletion() {
         let mut draft = Draft::new("Todo".into(), None);
         let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
@@ -904,6 +1072,10 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(100, 35)).unwrap();
         for mode in [
             Mode::Normal,
+            Mode::Column {
+                original: None,
+                draft: Box::new(Draft::new(String::new(), None)),
+            },
             Mode::Help(0),
             Mode::Detail(0),
             Mode::Delete(1),

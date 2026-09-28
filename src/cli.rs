@@ -140,6 +140,14 @@ pub struct Edit {
 }
 #[derive(Subcommand)]
 pub enum ColumnCommand {
+    /// Stack a column below its predecessor
+    Stack {
+        name: String,
+    },
+    /// Display a column in its own horizontal lane
+    Unstack {
+        name: String,
+    },
     List,
     Add {
         name: String,
@@ -394,37 +402,18 @@ pub fn run(cli: Cli) -> Result<()> {
             } else {
                 let columns = store.update(|b| {
                     match command {
-                        ColumnCommand::Add { name } => {
-                            b.columns.push(name.trim().into());
-                        }
+                        ColumnCommand::Add { name } => b.add_column(&name)?,
                         ColumnCommand::Rename { name, new_name } => {
-                            let old = b.column(&name)?;
-                            let new = new_name.trim().to_string();
-                            for column in &mut b.columns {
-                                if *column == old {
-                                    *column = new.clone();
-                                }
-                            }
-                            for card in &mut b.cards {
-                                if card.column == old {
-                                    card.column = new.clone();
-                                    card.touch();
-                                }
-                            }
+                            b.rename_column(&name, &new_name)?
                         }
                         ColumnCommand::Remove { name, move_to } => {
                             b.remove_column(&name, move_to.as_deref())?
                         }
                         ColumnCommand::Order { name, position } => {
-                            ensure!(
-                                (1..=b.columns.len()).contains(&position),
-                                "Position must be between 1 and {}",
-                                b.columns.len()
-                            );
-                            let name = b.column(&name)?;
-                            b.columns.retain(|c| c != &name);
-                            b.columns.insert(position - 1, name);
+                            b.order_column(&name, position)?
                         }
+                        ColumnCommand::Stack { name } => b.stack_column(&name, true)?,
+                        ColumnCommand::Unstack { name } => b.stack_column(&name, false)?,
                         ColumnCommand::List => unreachable!(),
                     }
                     Ok(b.columns.clone())
