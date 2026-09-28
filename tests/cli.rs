@@ -5,7 +5,10 @@ use std::path::Path;
 
 fn cmd(file: &Path) -> Command {
     let mut command = cargo_bin_cmd!("kanban");
-    command.arg("--file").arg(file);
+    command
+        .arg("--file")
+        .arg(file)
+        .env("XDG_DATA_HOME", file.parent().unwrap().join("data"));
     command
 }
 fn json(file: &Path, args: &[&str]) -> Value {
@@ -317,6 +320,7 @@ fn help_completions_and_noninteractive_errors() {
         .stderr(contains("interactive terminal"));
     cargo_bin_cmd!("kanban")
         .env("KANBAN_FILE", &file)
+        .env("XDG_DATA_HOME", dir.path().join("data"))
         .args(["--json", "stats"])
         .assert()
         .success()
@@ -525,4 +529,32 @@ fn legacy_boards_load_and_invalid_stacks_are_rejected() {
             .failure();
         assert_eq!(std::fs::read(&file).unwrap(), before);
     }
+}
+
+#[test]
+fn recent_boards_persist_and_failed_opens_do_not_enter_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = dir.path().join("first.json");
+    let second = dir.path().join("second.json");
+    init(&first);
+    cmd(&second).args(["init", "Second"]).assert().success();
+    let entries = json(&first, &["boards"]);
+    assert_eq!(entries[0]["name"], "Second");
+    assert_eq!(entries[1]["path"], first.to_str().unwrap());
+    json(&first, &["stats"]);
+    assert_eq!(json(&first, &["boards"])[0]["name"], "Release");
+    cmd(&dir.path().join("missing.json"))
+        .arg("list")
+        .assert()
+        .failure();
+    assert_eq!(json(&first, &["boards"]).as_array().unwrap().len(), 2);
+    let history = dir.path().join("data/kanban/recent-boards.json");
+    std::fs::write(&history, "broken").unwrap();
+    cmd(&first)
+        .args(["add", "Still saved"])
+        .assert()
+        .success()
+        .stderr(contains("recent history was not saved"));
+    assert_eq!(json(&first, &["list"])[0]["title"], "Still saved");
+    assert_eq!(std::fs::read_to_string(history).unwrap(), "broken");
 }

@@ -1,5 +1,6 @@
 mod cli;
 mod model;
+mod recent;
 mod store;
 mod tui;
 

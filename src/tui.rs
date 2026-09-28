@@ -1,5 +1,6 @@
 use crate::{
     model::{self, Board, Card, Priority},
+    recent::{self, RecentBoard},
     store::Store,
 };
 use anyhow::{ensure, Result};
@@ -24,7 +25,7 @@ use std::{
 const ACCENT: Color = Color::Cyan;
 const MUTED: Color = Color::DarkGray;
 const BG: Color = Color::Rgb(17, 23, 34);
-const HELP: &str = "NAVIGATE\n  ←/→ or h/l       Select column\n  ↑/↓ or j/k       Select card\n  Home / End       First / last card\n  Enter            View full card (↑/↓ scroll)\n\nCARDS\n  n                New card in selected column\n  e                Edit selected card\n  H / L            Move card left / right\n  p                Cycle priority\n  a                Archive / restore card\n  d                Delete with confirmation\n\nCOLUMNS\n  N / E            Add / rename column\n  [ / ]            Reorder selected column\n  s                Stack below previous / unstack\n  Tab / Shift+Tab  Next / previous column\n\nBOARD\n  /                Search ID, text and tags\n  Esc              Clear search / close dialog\n  v                Toggle active / archived cards\n  r                Reload from disk\n  ?                This help\n  q / Ctrl+C       Quit\n\nEDITOR\n  Tab / Shift+Tab  Change field\n  ←/→ or Space     Cycle priority / column\n  ←/→ Home/End     Move text cursor\n  Enter            New line in description\n  Ctrl+S           Save card\n  Esc              Cancel\n\nChanges save immediately. CLI changes refresh automatically.\nExport data and remove columns with `kanban --help`.";
+const HELP: &str = "NAVIGATE\n  ←/→ or h/l       Select column\n  ↑/↓ or j/k       Select card\n  Home / End       First / last card\n  Enter            View full card (↑/↓ scroll)\n\nCARDS\n  n                New card in selected column\n  e                Edit selected card\n  H / L            Move card left / right\n  p                Cycle priority\n  a                Archive / restore card\n  d                Delete with confirmation\n\nCOLUMNS\n  N / E            Add / rename column\n  [ / ]            Reorder selected column\n  s                Stack below previous / unstack\n  Tab / Shift+Tab  Next / previous column\n\nBOARD\n  b                Create / open / switch boards\n  /                Search ID, text and tags\n  Esc              Clear search / close dialog\n  v                Toggle active / archived cards\n  r                Reload from disk\n  ?                This help\n  q / Ctrl+C       Quit\n\nEDITOR\n  Tab / Shift+Tab  Change field\n  ←/→ or Space     Cycle priority / column\n  ←/→ Home/End     Move text cursor\n  Enter            New line in description\n  Ctrl+S           Save card\n  Esc              Cancel\n\nChanges save immediately. CLI changes refresh automatically.\nExport data and remove columns with `kanban --help`.";
 
 struct TerminalGuard;
 impl Drop for TerminalGuard {
@@ -33,12 +34,25 @@ impl Drop for TerminalGuard {
         let _ = execute!(io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
     }
 }
-pub fn run(store: &Store) -> Result<()> {
+pub fn run(mut store: Store, allow_picker: bool) -> Result<()> {
     ensure!(
         io::stdin().is_terminal() && io::stdout().is_terminal(),
         "The TUI requires an interactive terminal; use `kanban list` in scripts"
     );
-    let board = store.read()?;
+    let mut active = true;
+    let board = match store.read() {
+        Ok(board) => board,
+        Err(_) if allow_picker && !store.path.exists() => {
+            active = false;
+            Board::new("Welcome".into(), vec!["Todo".into()])?
+        }
+        Err(error) => return Err(error),
+    };
+    let mut picker = if active {
+        None
+    } else {
+        Some(BoardPicker::new())
+    };
     enable_raw_mode()?;
     let _guard = TerminalGuard;
     execute!(io::stdout(), EnterAlternateScreen)?;
@@ -51,14 +65,51 @@ pub fn run(store: &Store) -> Result<()> {
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     terminal.clear()?;
     let mut app = App::new(board);
+    if active {
+        app.status = remember_status(&store);
+    }
     loop {
-        terminal.draw(|f| app.draw(f))?;
+        terminal.draw(|f| {
+            if let Some(picker) = &picker {
+                picker.draw(f);
+            } else {
+                app.draw(f);
+            }
+        })?;
         if event::poll(Duration::from_millis(250))? {
             if let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Release && app.key(key, store)? {
+                if key.kind == KeyEventKind::Release {
+                    continue;
+                }
+                if let Some(current) = &mut picker {
+                    if key.code == KeyCode::Char('c')
+                        && key.modifiers.contains(KeyModifiers::CONTROL)
+                    {
+                        break;
+                    }
+                    if current.draft.is_none()
+                        && matches!(key.code, KeyCode::Esc | KeyCode::Char('q'))
+                    {
+                        if !active {
+                            break;
+                        }
+                        picker = None;
+                    } else if let Some((next, board)) = current.key(key) {
+                        store = next;
+                        app = App::new(board);
+                        app.status = remember_status(&store);
+                        active = true;
+                        picker = None;
+                    }
+                } else if matches!(app.mode, Mode::Normal) && key.code == KeyCode::Char('b') {
+                    picker = Some(BoardPicker::new());
+                } else if app.key(key, &store)? {
                     break;
                 }
             }
+        }
+        if !active {
+            continue;
         }
         match store.read() {
             Ok(board) => {
@@ -70,6 +121,186 @@ pub fn run(store: &Store) -> Result<()> {
     }
     Ok(())
 }
+fn remember_status(store: &Store) -> String {
+    match recent::remember(store) {
+        Ok(()) => format!("Board: {}", store.path.display()),
+        Err(error) => format!("Board opened; recent history unavailable: {error:#}"),
+    }
+}
+
+struct BoardPicker {
+    entries: Vec<RecentBoard>,
+    selected: usize,
+    draft: Option<Box<Draft>>,
+    creating: bool,
+    error: String,
+}
+impl BoardPicker {
+    fn new() -> Self {
+        let result = recent::history_path().and_then(|path| recent::read(&path));
+        let (entries, error) = match result {
+            Ok(entries) => (entries, String::new()),
+            Err(error) => (Vec::new(), format!("History unavailable: {error:#}")),
+        };
+        Self {
+            entries,
+            selected: 0,
+            draft: None,
+            creating: false,
+            error,
+        }
+    }
+    fn key(&mut self, key: KeyEvent) -> Option<(Store, Board)> {
+        if let Some(draft) = &mut self.draft {
+            match key.code {
+                KeyCode::Esc => {
+                    self.draft = None;
+                    self.error.clear();
+                }
+                KeyCode::Tab | KeyCode::BackTab if self.creating => draft.field = 1 - draft.field,
+                KeyCode::Enter => {
+                    let result = (|| -> Result<(Store, Board)> {
+                        let path = draft.fields[1].trim();
+                        ensure!(!path.is_empty(), "Enter a JSON file path");
+                        let store = Store::new(path.into());
+                        if self.creating {
+                            let board = Board::new(
+                                draft.fields[0].trim().into(),
+                                vec!["Todo".into(), "In Progress".into(), "Done".into()],
+                            )?;
+                            store.init(board)?;
+                        }
+                        let board = store.read()?;
+                        Ok((store, board))
+                    })();
+                    match result {
+                        Ok(opened) => return Some(opened),
+                        Err(error) => self.error = format!("{error:#}"),
+                    }
+                }
+                _ => draft.input(key),
+            }
+        } else {
+            match key.code {
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.selected = (self.selected + 1).min(self.entries.len().saturating_sub(1))
+                }
+                KeyCode::Up | KeyCode::Char('k') => self.selected = self.selected.saturating_sub(1),
+                KeyCode::Enter => {
+                    if let Some(entry) = self.entries.get(self.selected) {
+                        let store = Store::new(entry.path.clone());
+                        match store.read() {
+                            Ok(board) => return Some((store, board)),
+                            Err(error) => self.error = format!("{error:#}"),
+                        }
+                    }
+                }
+                KeyCode::Char('n') | KeyCode::Char('o') => {
+                    self.creating = key.code == KeyCode::Char('n');
+                    self.error.clear();
+                    let mut draft = Draft::new(String::new(), None);
+                    if self.creating {
+                        match crate::cli::default_board_path() {
+                            Ok(path) => {
+                                draft.fields[1] = path
+                                    .with_file_name("boards")
+                                    .join(format!(
+                                        "board-{}.json",
+                                        chrono::Utc::now().format("%Y%m%d-%H%M%S-%f")
+                                    ))
+                                    .display()
+                                    .to_string();
+                                draft.cursors[1] = draft.fields[1].len();
+                            }
+                            Err(error) => self.error = format!("{error:#}"),
+                        }
+                    } else {
+                        draft.field = 1;
+                    }
+                    self.draft = Some(Box::new(draft));
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+    fn draw(&self, f: &mut Frame) {
+        let area = f.area();
+        f.render_widget(Clear, area);
+        if let Some(draft) = &self.draft {
+            let text = if self.creating {
+                format!("Name: {}\n\nJSON path: {}\n\nTab change field · Enter create · Esc cancel\n\n{}", draft.displayed(0), draft.displayed(1), self.error)
+            } else {
+                format!(
+                    "JSON path: {}\n\nEnter open · Esc cancel\n\n{}",
+                    draft.displayed(1),
+                    self.error
+                )
+            };
+            popup(
+                f,
+                if self.creating {
+                    " Create board "
+                } else {
+                    " Open board "
+                },
+                &text,
+                90,
+                16,
+                0,
+            );
+            return;
+        }
+        let chunks = Layout::vertical([
+            Constraint::Length(3),
+            Constraint::Min(1),
+            Constraint::Length(4),
+        ])
+        .split(area);
+        f.render_widget(Paragraph::new("KANBAN · Boards\nn Create new · o Open JSON · ↑/↓ Select · Enter Switch · Esc/q Back or quit"), chunks[0]);
+        let items: Vec<_> = self
+            .entries
+            .iter()
+            .map(|entry| {
+                ListItem::new(format!(
+                    "{}\n  {}{}",
+                    clean(&entry.name),
+                    clean(&entry.path.display().to_string()),
+                    if entry.path.exists() {
+                        ""
+                    } else {
+                        " [missing]"
+                    }
+                ))
+            })
+            .collect();
+        let mut state = ListState::default().with_selected(Some(self.selected));
+        f.render_stateful_widget(
+            List::new(items)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" Recent boards "),
+                )
+                .highlight_style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD))
+                .highlight_symbol("› "),
+            chunks[1],
+            &mut state,
+        );
+        let message = if !self.error.is_empty() {
+            self.error.as_str()
+        } else if self.entries.is_empty() {
+            "No recent boards. Press n to create one or o to open a JSON file."
+        } else {
+            "Each board saves immediately to its own JSON file."
+        };
+        f.render_widget(
+            Paragraph::new(clean(message)).wrap(Wrap { trim: true }),
+            chunks[2],
+        );
+    }
+}
+
 #[derive(Default)]
 enum Mode {
     #[default]
@@ -691,7 +922,7 @@ impl App {
         );
         f.render_widget(
             Paragraph::new(
-                " ←↓↑→ navigate  n/e cards  N/E columns  s stack  [/] reorder  ? help  q quit",
+                " ←↓↑→ navigate  b boards  n/e cards  N/E columns  s stack  [/] reorder  ? help  q quit",
             )
             .style(Style::default().fg(Color::Gray))
             .wrap(Wrap { trim: true }),
@@ -903,6 +1134,54 @@ mod tests {
         )
         .unwrap()
     }
+    #[test]
+    fn board_picker_creates_opens_and_reports_errors_without_overwriting() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("new.json");
+        let mut picker = BoardPicker {
+            entries: Vec::new(),
+            selected: 0,
+            draft: None,
+            creating: false,
+            error: String::new(),
+        };
+        let press =
+            |picker: &mut BoardPicker, code| picker.key(KeyEvent::new(code, KeyModifiers::NONE));
+        press(&mut picker, KeyCode::Char('o'));
+        press(&mut picker, KeyCode::Enter);
+        assert!(picker.error.contains("path"));
+        press(&mut picker, KeyCode::Esc);
+        // Populate the create form directly to keep environment access out of unit tests.
+        let mut draft = Draft::new(String::new(), None);
+        draft.fields[0] = "Project λ".into();
+        draft.fields[1] = path.display().to_string();
+        picker.creating = true;
+        picker.draft = Some(Box::new(draft));
+        let (_, board) = press(&mut picker, KeyCode::Enter).unwrap();
+        assert_eq!(board.name, "Project λ");
+        let before = std::fs::read(&path).unwrap();
+        assert!(press(&mut picker, KeyCode::Enter).is_none());
+        assert!(picker.error.contains("already exists"));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        press(&mut picker, KeyCode::Esc);
+        picker.entries.push(RecentBoard {
+            name: board.name,
+            path: path.clone(),
+        });
+        assert!(press(&mut picker, KeyCode::Enter).is_some());
+        std::fs::remove_file(path).unwrap();
+        assert!(press(&mut picker, KeyCode::Enter).is_none());
+        assert!(picker.error.contains("Cannot read"));
+        for (width, height) in [(110, 32), (35, 12), (15, 5)] {
+            let mut terminal =
+                Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+            terminal.draw(|f| picker.draw(f)).unwrap();
+            press(&mut picker, KeyCode::Char('o'));
+            terminal.draw(|f| picker.draw(f)).unwrap();
+            press(&mut picker, KeyCode::Esc);
+        }
+    }
+
     #[test]
     fn columns_can_be_created_renamed_reordered_and_stacked() {
         let dir = tempfile::tempdir().unwrap();

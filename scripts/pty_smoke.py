@@ -18,7 +18,7 @@ import time
 binary = str(Path(sys.argv[1] if len(sys.argv) > 1 else "target/debug/kanban").resolve())
 
 
-def session(board, quit_key, exercise):
+def session(board, quit_key, exercise, startup=False):
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 110, 0, 0))
     before = termios.tcgetattr(slave)
@@ -28,7 +28,7 @@ def session(board, quit_key, exercise):
         fcntl.ioctl(0, termios.TIOCSCTTY, 0)
 
     process = subprocess.Popen(
-        [binary, "--file", str(board)], stdin=slave, stdout=slave, stderr=slave,
+        ([binary] if startup else [binary, "--file", str(board)]), stdin=slave, stdout=slave, stderr=slave,
         preexec_fn=attach, env={**os.environ, "TERM": "xterm-256color"},
     )
     output = bytearray()
@@ -62,7 +62,24 @@ def session(board, quit_key, exercise):
 
     try:
         wait_for(lambda: b"KANBAN" in output)
+        if startup:
+            wait_for(lambda: b"Recent" in output)
         if exercise:
+            send(b"b")
+            wait_for(lambda: b"Recent" in output)
+            if os.environ.get("KANBAN_CAPTURE"):
+                Path(os.environ["KANBAN_CAPTURE"]).write_bytes(output)
+            send(b"n")
+            send(b"Switched board\t")
+            # Replace the suggested path using Home and Delete.
+            send(b"\x1b[H" + b"\x1b[3~" * 300)
+            other = board.parent / "other.json"
+            send(str(other).encode() + b"\r")
+            wait_for(lambda: other.exists())
+            send(b"nOther card\x13")
+            wait_for(lambda: len(json.loads(other.read_text())["cards"]) == 1)
+            assert not json.loads(board.read_text())["cards"]
+            send(b"bo" + str(board).encode() + b"\r")
             send(b"n")
             send("Terminal λ".encode())
             send(b"\tDescription from terminal\tcli,tui\t2026-12-01\t\x1b[C\t\x1b[C")
@@ -115,8 +132,11 @@ def session(board, quit_key, exercise):
 
 
 with tempfile.TemporaryDirectory(prefix="kanban-pty-") as directory:
+    os.environ["XDG_DATA_HOME"] = str(Path(directory) / "data")
+    os.environ.pop("KANBAN_FILE", None)
     board = Path(directory) / "board.json"
     subprocess.run([binary, "--file", str(board), "init", "Terminal test"], check=True, capture_output=True)
     session(board, b"q", True)
     session(board, b"\x03", False)
-print("PTY smoke passed: create/edit/move/archive/restore, resize, q/Ctrl+C, terminal restoration")
+    session(board, b"q", False, startup=True)
+print("PTY smoke passed: board create/open/switch, startup picker, cards, resize, q/Ctrl+C, terminal restoration")

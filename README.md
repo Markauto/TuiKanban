@@ -36,6 +36,23 @@ or migrated. Open one with `kanban --file .kanban.json`, or copy it into the new
 default location with `kanban import .kanban.json` (refuses to replace an existing
 board unless `--force` is supplied).
 
+## Create, open, and switch boards
+
+Run `kanban` without an existing default board to see the board picker. From an
+open board, press `b` to return to it. Use `n` to create a board, `o` to open an
+existing JSON file, or arrows and Enter to switch to a recent board. Esc cancels.
+Creating asks for a name and suggests a unique JSON path under the data directory's
+`kanban/boards/` folder; Tab lets you edit the path before pressing Enter. Existing
+files are never overwritten. Open accepts a full or current-directory-relative path.
+
+The last 20 successfully used boards are remembered, most recent first, in
+`kanban/recent-boards.json` under the same data directory. History stores names and
+absolute paths, not copies of boards. Missing files remain visible so you can locate
+and reopen them. History errors are reported without blocking board saves.
+`kanban boards` lists recent boards (`--json` is supported). Successful CLI board
+commands also update history. The default board and explicit file precedence stay
+unchanged; switching in the TUI does not redirect later CLI commands.
+
 ## Arch Linux package
 
 Build and install from this checkout with `base-devel` and `rust` installed:
@@ -71,6 +88,7 @@ release recipe. Supported package architectures: x86_64 and aarch64.
 | `d` | Delete after confirmation |
 | `/` | Search ID, title, description, column, and tags |
 | `Esc` | Clear filter / close dialog |
+| `b` | Create, open, or switch boards |
 | `r` | Reload |
 | `?` | Help (scroll with arrows) |
 | `q` / `Ctrl+C` | Quit |

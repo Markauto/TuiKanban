@@ -1,5 +1,6 @@
 use crate::{
     model::{self, Board, Card, Priority},
+    recent,
     store::Store,
     tui,
 };
@@ -38,6 +39,8 @@ pub enum Command {
     },
     /// Open the interactive board (also the default command)
     Tui,
+    /// List recently used boards (most recent first)
+    Boards,
     /// Create a card
     Add {
         title: String,
@@ -194,7 +197,7 @@ fn result_card(card: &Card, json: bool, action: &str) -> Result<()> {
         Ok(())
     }
 }
-fn default_board_path() -> Result<PathBuf> {
+pub(crate) fn default_board_path() -> Result<PathBuf> {
     // XDG paths must be absolute; empty or relative values are ignored.
     if let Some(data_home) = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
@@ -215,19 +218,39 @@ pub fn run(cli: Cli) -> Result<()> {
         clap_complete::generate(*shell, &mut Cli::command(), "kanban", &mut io::stdout());
         return Ok(());
     }
+    if matches!(command, Command::Boards) {
+        let entries = recent::read(&recent::history_path()?)?;
+        if cli.json {
+            emit(&entries)?;
+        } else if entries.is_empty() {
+            println!("No recent boards. Run `kanban` to create or open one.");
+        } else {
+            for entry in entries {
+                println!(
+                    "{}  {}",
+                    plain(&entry.name),
+                    plain(&entry.path.display().to_string())
+                );
+            }
+        }
+        return Ok(());
+    }
+    let explicit = cli.file.is_some();
     let path = match cli.file {
         Some(path) => path,
         None => default_board_path()?,
     };
     let store = Store::new(path);
     match command {
-        Command::Completions { .. } => unreachable!("handled before resolving the board path"),
+        Command::Boards | Command::Completions { .. } => {
+            unreachable!("handled before resolving the board path")
+        }
         Command::Tui => {
             ensure!(
                 !cli.json,
                 "--json is for CLI commands, not the interactive TUI"
             );
-            tui::run(&store)?;
+            return tui::run(store, !explicit);
         }
         Command::Init { name, columns } => {
             let board = Board::new(
@@ -497,6 +520,11 @@ pub fn run(cli: Cli) -> Result<()> {
                 );
             }
         }
+    }
+    if let Err(error) = recent::remember(&store) {
+        eprintln!(
+            "Warning: board operation succeeded, but recent history was not saved: {error:#}"
+        );
     }
     Ok(())
 }

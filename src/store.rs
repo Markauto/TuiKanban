@@ -14,13 +14,13 @@ impl Store {
     pub fn new(path: PathBuf) -> Self {
         Self { path }
     }
-    fn parent(&self) -> &Path {
+    pub(crate) fn parent(&self) -> &Path {
         self.path
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or(Path::new("."))
     }
-    fn lock(&self) -> Result<File> {
+    pub(crate) fn lock(&self) -> Result<File> {
         fs::create_dir_all(self.parent()).context("Cannot create board directory")?;
         let mut name = self.path.as_os_str().to_owned();
         name.push(".lock");
