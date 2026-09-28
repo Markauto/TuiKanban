@@ -71,28 +71,27 @@ release recipe. Supported package architectures: x86_64 and aarch64.
 
 ## Terminal controls
 
-| Key | Action |
-| --- | --- |
-| Arrow keys / `h j k l` | Navigate columns and cards |
-| `Home` / `End` | Select first / last card |
-| `n` / `e` | Create / edit a card |
-| `N` / `E` | Add / rename a column (Enter or Ctrl+S saves) |
-| `[` / `]` | Move selected column earlier / later |
-| `s` | Stack selected column below its predecessor / unstack |
-| `Tab` / `Shift+Tab` | Select next / previous column, including stacked columns |
-| `Enter` | View details; arrows scroll |
-| `H` / `L` | Move selected card left / right |
-| `p` | Cycle priority |
-| `a` | Archive, or restore in archive view |
-| `v` | Switch between active and archived cards |
-| `d` | Delete after confirmation |
-| `/` | Search ID, title, description, column, and tags |
-| `:` | Run a Kanban command |
-| `Esc` | Clear filter / close dialog |
-| `b` | Create, open, or switch boards |
-| `r` | Reload |
-| `?` | Help (scroll with arrows) |
-| `q` / `Ctrl+C` | Quit |
+Cards mode is active on startup. Press `Tab` (or `Shift+Tab`) to switch
+between **Cards** and **Columns**. The header shows the active mode and the footer
+shows its controls. Dialogs return to the mode they opened from.
+
+| Key | Cards mode | Columns mode |
+| --- | --- | --- |
+| Left/Right / `h l` | Select column | Select column |
+| Up/Down / `j k` | Select card | Select column, including stacked columns |
+| `Home` / `End` | First / last card | First / last column |
+| `n` / `e` | Create / edit card | Add / rename column |
+| `H` / `L` | Move card left / right | Reorder column left / right |
+| `Enter` | View card details | Enter Cards mode |
+| `p` | Cycle priority | — |
+| `a` | Archive / restore card | — |
+| `d` | Delete card with confirmation | — |
+| `s` | — | Stack below previous column / unstack |
+
+In either mode, `b` opens the board picker, `/` searches, `v` toggles archived
+cards, `r` reloads, `:` runs a command, `?` opens help, and `q` / `Ctrl+C`
+quits. On the board, `Esc` returns to Cards and clears the filter; in a dialog,
+it closes or cancels the dialog. Column names save with Enter or Ctrl+S.
 
 In text fields, Left/Right and Home/End move the cursor; Backspace/Delete remove characters. In the editor, use `Tab` / `Shift+Tab` to change fields, arrows or Space to change priority/column, `Enter` for a description newline, `Ctrl+S` to save, and `Esc` to cancel. Blank tags or due date clear that field. Column lanes page horizontally on smaller terminals; tall stacks page vertically to keep the selection visible. The TUI needs at least 30×10 cells; 100×30 or larger is recommended.
 
@@ -157,7 +156,7 @@ kanban --file personal.json
 
 `--json` produces structured results for every data command. `export` always writes complete JSON to stdout. Errors go to stderr with a nonzero exit status. `list` defaults to active cards; `--archived` shows only archived cards and `--all` includes both. Priority sorts urgent first, and due-date sorting puts undated cards last. Overdue means before today's UTC date, independent of column name (archive completed work to omit it from active statistics).
 
-Stacking is saved with the board. A stacked column appears beneath its predecessor in column order; consecutive stacked columns share a lane. Reordering changes that predecessor. The first column cannot be stacked and is automatically unstacked after reordering or removal. Use `[` / `]` to place a column after the desired upper column, then `s` to stack it. Left/Right and Tab traverse columns in board order; Up/Down continue to select cards.
+Stacking is saved with the board. A stacked column appears beneath its predecessor in column order; consecutive stacked columns share a lane. Reordering changes that predecessor. The first column cannot be stacked and is automatically unstacked after reordering or removal. In Columns mode, use `H` / `L` to place a column after the desired upper column, then `s` to stack it. Arrow keys traverse columns in board order. Press `Tab` or `Enter` to manage cards in the selected column.
 
 Column names match without regard to case and must be unique. Removing a populated column requires `--move-to`, including when it contains archived cards. IDs are stable and never reused after deletion. Tags are comma-separated and deduplicated without regard to case. Card order in the TUI is creation order.
 

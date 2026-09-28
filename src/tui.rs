@@ -25,7 +25,52 @@ use std::{
 const ACCENT: Color = Color::Cyan;
 const MUTED: Color = Color::DarkGray;
 const BG: Color = Color::Rgb(17, 23, 34);
-const HELP: &str = "NAVIGATE\n  ←/→ or h/l       Select column\n  ↑/↓ or j/k       Select card\n  Home / End       First / last card\n  Enter            View full card (↑/↓ scroll)\n\nCARDS\n  n                New card in selected column\n  e                Edit selected card\n  H / L            Move card left / right\n  p                Cycle priority\n  a                Archive / restore card\n  d                Delete with confirmation\n\nCOLUMNS\n  N / E            Add / rename column\n  [ / ]            Reorder selected column\n  s                Stack below previous / unstack\n  Tab / Shift+Tab  Next / previous column\n\nBOARD\n  b                Create / open / switch boards\n  /                Search ID, text and tags\n  Esc              Clear search / close dialog\n  v                Toggle active / archived cards\n  r                Reload from disk\n  :                Run a Kanban command (:help for usage)\n  ?                This help\n  q / Ctrl+C       Quit\n\nEDITOR\n  Tab / Shift+Tab  Change field\n  ←/→ or Space     Cycle priority / column\n  ←/→ Home/End     Move text cursor\n  Enter            New line in description\n  Ctrl+S           Save card\n  Esc              Cancel\n\nChanges save immediately. CLI changes refresh automatically.\nRun CLI commands here with : (for example, :column add Blocked).";
+const HELP: &str = "MODES
+  Tab / Shift+Tab  Switch Cards / Columns
+  Esc              Return to Cards and clear filter
+  Dialogs return to the mode they opened from.
+
+BOTH MODES
+  ←/→ or h/l       Select column
+  n / e            Create / edit selected item
+  H / L            Move selected item left / right
+
+CARDS (default)
+  ↑/↓ or j/k       Select card
+  Home / End       First / last card
+  Enter            View full card (↑/↓ scroll)
+  p                Cycle priority
+  a                Archive / restore card
+  d                Delete with confirmation
+
+COLUMNS
+  ↑/↓ or j/k       Select previous / next column
+  Home / End       First / last column
+  n / e            Add / rename column
+  H / L            Reorder column
+  s                Stack below previous / unstack
+  Enter            Enter Cards in selected column
+
+BOARD (both modes)
+  b                Create / open / switch boards
+  /                Search ID, text and tags
+  v                Toggle active / archived cards
+  r                Reload from disk
+  :                Run a Kanban command (:help for usage)
+  ?                This help
+  q / Ctrl+C       Quit
+
+EDITOR
+  Tab / Shift+Tab  Change field
+  ←/→ or Space     Cycle priority / column
+  ←/→ Home/End     Move text cursor
+  Enter            New line in description
+  Ctrl+S           Save card
+  Esc              Cancel
+  Enter / Ctrl+S   Save column name
+
+Changes save immediately. CLI changes refresh automatically.
+Run CLI commands here with : (for example, :column add Blocked).";
 
 struct TerminalGuard;
 impl Drop for TerminalGuard {
@@ -301,6 +346,12 @@ impl BoardPicker {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Focus {
+    Cards,
+    Columns,
+}
+
 #[derive(Default)]
 enum Mode {
     #[default]
@@ -451,6 +502,7 @@ struct App {
     query: String,
     archived: bool,
     mode: Mode,
+    focus: Focus,
     status: String,
     command_selection: usize,
 }
@@ -463,6 +515,7 @@ impl App {
             query: String::new(),
             archived: false,
             mode: Mode::Normal,
+            focus: Focus::Cards,
             status: "Ready · changes save automatically".into(),
             command_selection: 0,
         }
@@ -747,10 +800,12 @@ impl App {
         Ok(false)
     }
     fn normal_key(&mut self, key: KeyEvent, store: &Store) -> Result<Mode> {
-        let id = self.selected().map(|c| c.id);
+        let id = (self.focus == Focus::Cards)
+            .then(|| self.selected().map(|c| c.id))
+            .flatten();
         match key.code {
-            KeyCode::Char('N') | KeyCode::Char('E') => {
-                let original = (key.code == KeyCode::Char('E'))
+            KeyCode::Char('n') | KeyCode::Char('e') if self.focus == Focus::Columns => {
+                let original = (key.code == KeyCode::Char('e'))
                     .then(|| self.board.columns[self.column].clone());
                 let mut draft = Draft::new(String::new(), None);
                 draft.fields[0] = original.clone().unwrap_or_default();
@@ -760,15 +815,15 @@ impl App {
                     draft: Box::new(draft),
                 });
             }
-            KeyCode::Char('s') => {
+            KeyCode::Char('s') if self.focus == Focus::Columns => {
                 let name = self.board.columns[self.column].clone();
                 store.update(|b| b.stack_column(&name, !b.stacked_columns.contains(&name)))?;
                 self.refresh(store)?;
                 self.status = "Column layout saved".into();
             }
-            KeyCode::Char('[') | KeyCode::Char(']') => {
+            KeyCode::Char('H') | KeyCode::Char('L') if self.focus == Focus::Columns => {
                 let name = self.board.columns[self.column].clone();
-                let target = if key.code == KeyCode::Char('[') {
+                let target = if key.code == KeyCode::Char('H') {
                     self.column.saturating_sub(1)
                 } else {
                     (self.column + 1).min(self.board.columns.len() - 1)
@@ -783,11 +838,34 @@ impl App {
                     .unwrap_or(0);
                 self.status = "Column order saved".into();
             }
-            KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
+            KeyCode::Tab | KeyCode::BackTab => {
+                self.focus = match self.focus {
+                    Focus::Cards => Focus::Columns,
+                    Focus::Columns => Focus::Cards,
+                };
+            }
+            KeyCode::Enter if self.focus == Focus::Columns => self.focus = Focus::Cards,
+            KeyCode::Down | KeyCode::Char('j') if self.focus == Focus::Columns => {
+                self.column = (self.column + 1).min(self.board.columns.len() - 1);
+                self.row = 0;
+            }
+            KeyCode::Up | KeyCode::Char('k') if self.focus == Focus::Columns => {
                 self.column = self.column.saturating_sub(1);
                 self.row = 0;
             }
-            KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
+            KeyCode::Home if self.focus == Focus::Columns => {
+                self.column = 0;
+                self.row = 0;
+            }
+            KeyCode::End if self.focus == Focus::Columns => {
+                self.column = self.board.columns.len() - 1;
+                self.row = 0;
+            }
+            KeyCode::Left | KeyCode::Char('h') => {
+                self.column = self.column.saturating_sub(1);
+                self.row = 0;
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
                 self.column = (self.column + 1).min(self.board.columns.len() - 1);
                 self.row = 0;
             }
@@ -802,6 +880,7 @@ impl App {
             }
             KeyCode::Char('/') => return Ok(Mode::Search),
             KeyCode::Esc => {
+                self.focus = Focus::Cards;
                 self.query.clear();
                 self.row = 0;
             }
@@ -908,6 +987,13 @@ impl App {
                     .bg(ACCENT)
                     .add_modifier(Modifier::BOLD),
             ),
+            Span::styled(
+                match self.focus {
+                    Focus::Cards => " CARDS ",
+                    Focus::Columns => " COLUMNS ",
+                },
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
             Span::raw(format!("  {}  ", clean(&self.board.name))),
             Span::styled(
                 format!(
@@ -933,9 +1019,12 @@ impl App {
                 .border_style(Style::default().fg(border));
             if cards.is_empty() {
                 f.render_widget(
-                    Paragraph::new("\n  No cards here\n\n  n  Create a card")
-                        .style(Style::default().fg(MUTED))
-                        .block(block),
+                    Paragraph::new(match self.focus {
+                        Focus::Cards => "\n  No cards here\n\n  n  Create a card",
+                        Focus::Columns => "\n  No cards here\n\n  Enter  Cards mode",
+                    })
+                    .style(Style::default().fg(MUTED))
+                    .block(block),
                     cell,
                 );
             } else {
@@ -986,11 +1075,12 @@ impl App {
                     .block(block)
                     .highlight_style(Style::default().bg(Color::Rgb(36, 53, 72)))
                     .highlight_symbol("▌ ");
-                let mut state = ListState::default().with_selected(if selected {
-                    Some(self.row)
-                } else {
-                    None
-                });
+                let mut state =
+                    ListState::default().with_selected(if selected && self.focus == Focus::Cards {
+                        Some(self.row)
+                    } else {
+                        None
+                    });
                 f.render_stateful_widget(list, cell, &mut state);
             }
         }
@@ -1012,9 +1102,10 @@ impl App {
             chunks[2],
         );
         f.render_widget(
-            Paragraph::new(
-                " ←↓↑→ navigate  b boards  n/e cards  N/E columns  : command  ? help  q quit",
-            )
+            Paragraph::new(match self.focus {
+                Focus::Cards => " Tab columns · n new · e edit · H/L move · p priority · a archive · d delete · Enter view · ? help · q quit",
+                Focus::Columns => " Tab cards · n new · e rename · H/L move · s stack · Enter cards · ? help · q quit",
+            })
             .style(Style::default().fg(Color::Gray))
             .wrap(Wrap { trim: true }),
             chunks[3],
@@ -1350,7 +1441,8 @@ mod tests {
             app.key(KeyEvent::new(code, KeyModifiers::NONE), &store)
                 .unwrap();
         };
-        press(&mut app, KeyCode::Char('N'));
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Char('n'));
         press(&mut app, KeyCode::Enter);
         assert!(matches!(app.mode, Mode::Column { .. }));
         for c in "Review λ".chars() {
@@ -1358,22 +1450,106 @@ mod tests {
         }
         press(&mut app, KeyCode::Enter);
         assert_eq!(app.board.columns[app.column], "Review λ");
-        press(&mut app, KeyCode::Char('E'));
+        press(&mut app, KeyCode::Char('e'));
         press(&mut app, KeyCode::End);
         press(&mut app, KeyCode::Char('!'));
         press(&mut app, KeyCode::Enter);
-        press(&mut app, KeyCode::Char('['));
+        press(&mut app, KeyCode::Char('H'));
         press(&mut app, KeyCode::Char('s'));
         let saved = store.read().unwrap();
         assert_eq!(saved.columns, ["Todo", "Doing", "Review λ!", "Done"]);
         assert_eq!(saved.stacked_columns, ["Review λ!"]);
         press(&mut app, KeyCode::Char('s'));
         assert!(store.read().unwrap().stacked_columns.is_empty());
-        press(&mut app, KeyCode::Char('N'));
+        press(&mut app, KeyCode::Char('n'));
         press(&mut app, KeyCode::Char('x'));
         press(&mut app, KeyCode::Esc);
         assert_eq!(store.read().unwrap().columns.len(), 4);
     }
+    #[test]
+    fn modes_scope_actions_preserve_dialog_focus_and_render_hints() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("board.json"));
+        let mut b = board();
+        b.add(
+            "Task".into(),
+            "Todo",
+            String::new(),
+            Priority::Low,
+            vec![],
+            None,
+        )
+        .unwrap();
+        store.init(b).unwrap();
+        let mut app = App::new(store.read().unwrap());
+        let press = |app: &mut App, code| {
+            app.key(KeyEvent::new(code, KeyModifiers::NONE), &store)
+                .unwrap();
+        };
+        assert!(app.focus == Focus::Cards);
+        press(&mut app, KeyCode::Tab);
+        let before = std::fs::read(&store.path).unwrap();
+        for c in ['a', 'p', 'd'] {
+            press(&mut app, KeyCode::Char(c));
+            assert!(matches!(app.mode, Mode::Normal));
+        }
+        assert_eq!(std::fs::read(&store.path).unwrap(), before);
+        for code in [
+            KeyCode::Char('e'),
+            KeyCode::Char('?'),
+            KeyCode::Char('/'),
+            KeyCode::Char(':'),
+        ] {
+            press(&mut app, code);
+            assert!(!matches!(app.mode, Mode::Normal));
+            press(&mut app, KeyCode::Esc);
+            assert!(matches!(app.mode, Mode::Normal));
+            assert!(app.focus == Focus::Columns);
+        }
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.column, 1);
+        assert_eq!(app.row, 0);
+        press(&mut app, KeyCode::End);
+        assert_eq!(app.column, 2);
+        press(&mut app, KeyCode::Home);
+        assert_eq!(app.column, 0);
+        press(&mut app, KeyCode::Enter);
+        assert!(app.focus == Focus::Cards);
+        press(&mut app, KeyCode::Char('e'));
+        assert!(matches!(app.mode, Mode::Edit(_)));
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::BackTab);
+        assert!(app.focus == Focus::Columns);
+        app.query = "Task".into();
+        press(&mut app, KeyCode::Esc);
+        assert!(app.focus == Focus::Cards);
+        assert!(app.query.is_empty());
+        for focus in [Focus::Cards, Focus::Columns] {
+            app.focus = focus;
+            for (width, height) in [(100, 30), (35, 12)] {
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal.draw(|f| app.draw(f)).unwrap();
+                let text: String = terminal
+                    .backend()
+                    .buffer()
+                    .content
+                    .iter()
+                    .map(|c| c.symbol())
+                    .collect();
+                assert!(text.contains(if focus == Focus::Cards {
+                    "CARDS"
+                } else {
+                    "COLUMNS"
+                }));
+                assert!(text.contains(if focus == Focus::Cards {
+                    "Tab columns"
+                } else {
+                    "Tab cards"
+                }));
+            }
+        }
+    }
+
     #[test]
     fn stacked_columns_render_above_each_other_and_selection_stays_visible() {
         let mut b = board();
