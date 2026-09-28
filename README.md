@@ -87,6 +87,7 @@ release recipe. Supported package architectures: x86_64 and aarch64.
 | `v` | Switch between active and archived cards |
 | `d` | Delete after confirmation |
 | `/` | Search ID, title, description, column, and tags |
+| `:` | Run a Kanban command |
 | `Esc` | Clear filter / close dialog |
 | `b` | Create, open, or switch boards |
 | `r` | Reload |
@@ -96,6 +97,31 @@ release recipe. Supported package architectures: x86_64 and aarch64.
 In text fields, Left/Right and Home/End move the cursor; Backspace/Delete remove characters. In the editor, use `Tab` / `Shift+Tab` to change fields, arrows or Space to change priority/column, `Enter` for a description newline, `Ctrl+S` to save, and `Esc` to cancel. Blank tags or due date clear that field. Column lanes page horizontally on smaller terminals; tall stacks page vertically to keep the selection visible. The TUI needs at least 30×10 cells; 100×30 or larger is recommended.
 
 Changes save immediately. The TUI refreshes external changes automatically. If another session changes a card while its editor is open, saving reports a conflict; cancel and reopen to use the latest version.
+
+Press `:` and enter a CLI command without the `kanban` prefix, then press Enter:
+
+```text
+:add "Ship release" --priority high
+:move 1 "In Progress"
+:column add Blocked
+:list --all --json
+:help
+```
+
+Commands use the currently open board, including after switching with `b`.
+As you type, the prompt suggests commands, subcommands, options, and values,
+with descriptions and usage hints. Use Up/Down (or Shift+Tab for previous) to
+select a suggestion and Tab to insert it; Enter runs the command as written.
+For example, type `:ad`, Tab, then a title. Priorities, sort orders, column names,
+card IDs (with titles), and existing tags for `--tag` are suggested in context.
+Completion quotes names containing spaces and works at the cursor when editing.
+Quotes and backslash escapes are supported. These are Kanban commands; shell
+expansion, pipes, and redirection are unavailable. `:export` displays JSON in the
+app. Use `b` to switch files; `tui` cannot open a nested session. Deletion still
+requires `--yes`, and replacing a board by import still requires `--force`.
+Results appear in a dialog: arrows or Page Up/Down scroll, Enter/Esc closes it,
+and `:` starts another command. Errors keep the command editable for correction.
+Esc cancels the prompt; `:q` or `:quit` exits the app.
 
 ## CLI examples
 

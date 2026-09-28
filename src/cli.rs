@@ -171,9 +171,8 @@ pub enum ColumnCommand {
         position: usize,
     },
 }
-fn emit(value: &impl serde::Serialize) -> Result<()> {
-    let mut out = io::stdout().lock();
-    serde_json::to_writer_pretty(&mut out, value)?;
+fn emit(out: &mut dyn Write, value: &impl serde::Serialize) -> Result<()> {
+    serde_json::to_writer_pretty(&mut *out, value)?;
     writeln!(out)?;
     Ok(())
 }
@@ -184,16 +183,17 @@ fn plain(value: &str) -> String {
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect()
 }
-fn result_card(card: &Card, json: bool, action: &str) -> Result<()> {
+fn result_card(out: &mut dyn Write, card: &Card, json: bool, action: &str) -> Result<()> {
     if json {
-        emit(card)
+        emit(out, card)
     } else {
-        println!(
+        writeln!(
+            out,
             "{action} #{}: {} [{}]",
             card.id,
             plain(&card.title),
             plain(&card.column)
-        );
+        )?;
         Ok(())
     }
 }
@@ -213,24 +213,66 @@ pub(crate) fn default_board_path() -> Result<PathBuf> {
 }
 
 pub fn run(cli: Cli) -> Result<()> {
+    run_with_output(cli, &mut io::stdout(), &mut io::stderr())
+}
+
+/// Execute the same CLI commands without writing into the TUI's terminal.
+pub(crate) fn run_command_line(line: &str, store: &Store) -> Result<String> {
+    let words = shlex::split(line).context("Unclosed quote or trailing escape in command")?;
+    let args = [
+        std::ffi::OsString::from("kanban"),
+        std::ffi::OsString::from("--file"),
+        store.path.as_os_str().to_owned(),
+    ]
+    .into_iter()
+    .chain(words.into_iter().map(std::ffi::OsString::from));
+    let cli = match Cli::try_parse_from(args) {
+        Ok(cli) => cli,
+        Err(error)
+            if matches!(
+                error.kind(),
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+            ) =>
+        {
+            return Ok(error.to_string());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    ensure!(
+        !matches!(cli.command, None | Some(Command::Tui)),
+        "Already in the TUI; use Esc to return to the board or b to switch boards"
+    );
+    ensure!(
+        cli.file.as_ref() == Some(&store.path),
+        "Commands use the open board; use b to switch boards instead of --file"
+    );
+    let mut output = Vec::new();
+    let mut warnings = Vec::new();
+    run_with_output(cli, &mut output, &mut warnings)?;
+    output.extend(warnings);
+    Ok(String::from_utf8(output)?)
+}
+
+fn run_with_output(cli: Cli, out: &mut dyn Write, err: &mut dyn Write) -> Result<()> {
     let command = cli.command.unwrap_or(Command::Tui);
     if let Command::Completions { shell } = &command {
-        clap_complete::generate(*shell, &mut Cli::command(), "kanban", &mut io::stdout());
+        clap_complete::generate(*shell, &mut Cli::command(), "kanban", &mut *out);
         return Ok(());
     }
     if matches!(command, Command::Boards) {
         let entries = recent::read(&recent::history_path()?)?;
         if cli.json {
-            emit(&entries)?;
+            emit(out, &entries)?;
         } else if entries.is_empty() {
-            println!("No recent boards. Run `kanban` to create or open one.");
+            writeln!(out, "No recent boards. Run `kanban` to create or open one.")?;
         } else {
             for entry in entries {
-                println!(
+                writeln!(
+                    out,
                     "{}  {}",
                     plain(&entry.name),
                     plain(&entry.path.display().to_string())
-                );
+                )?;
             }
         }
         return Ok(());
@@ -259,9 +301,9 @@ pub fn run(cli: Cli) -> Result<()> {
             )?;
             store.init(board.clone())?;
             if cli.json {
-                emit(&board)?;
+                emit(out, &board)?;
             } else {
-                println!("Created {} at {}", board.name, store.path.display());
+                writeln!(out, "Created {} at {}", board.name, store.path.display())?;
             }
         }
         Command::Add {
@@ -277,7 +319,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 let id = b.add(title, &col, description, priority, model::tags(&tags), due)?;
                 Ok(b.card(id)?.clone())
             })?;
-            result_card(&card, cli.json, "Added")?;
+            result_card(out, &card, cli.json, "Added")?;
         }
         Command::List(filter) => {
             let board = store.read()?;
@@ -311,16 +353,18 @@ pub fn run(cli: Cli) -> Result<()> {
                 Sort::Title => cards.sort_by_key(|c| c.title.to_lowercase()),
             }
             if cli.json {
-                emit(&cards)?;
+                emit(out, &cards)?;
             } else if cards.is_empty() {
-                println!("No matching cards.");
+                writeln!(out, "No matching cards.")?;
             } else {
-                println!(
+                writeln!(
+                    out,
                     "{:<6} {:<18} {:<8} {:<10} TITLE / TAGS",
                     "ID", "COLUMN", "PRIORITY", "DUE"
-                );
+                )?;
                 for c in cards {
-                    println!(
+                    writeln!(
+                        out,
                         "{:<6} {:<18} {:<8} {:<10} {}{}{}",
                         c.id,
                         plain(&c.column),
@@ -333,7 +377,7 @@ pub fn run(cli: Cli) -> Result<()> {
                         } else {
                             format!("  #{}", c.tags.join(" #"))
                         }
-                    );
+                    )?;
                 }
             }
         }
@@ -341,9 +385,9 @@ pub fn run(cli: Cli) -> Result<()> {
             let board = store.read()?;
             let c = board.card(id)?;
             if cli.json {
-                emit(c)?;
+                emit(out, c)?;
             } else {
-                println!("#{} {}\nColumn: {}{}\nPriority: {}\nTags: {}\nDue: {}\nCreated: {}\nUpdated: {}\n\n{}", c.id, plain(&c.title), plain(&c.column), if c.archived { " (archived)" } else { "" }, c.priority, c.tags.join(", "), c.due.map(|d| d.to_string()).unwrap_or_else(|| "-".into()), c.created_at, c.updated_at, c.description.chars().filter(|c| !c.is_control() || *c == '\n' || *c == '\t').collect::<String>());
+                writeln!(out, "#{} {}\nColumn: {}{}\nPriority: {}\nTags: {}\nDue: {}\nCreated: {}\nUpdated: {}\n\n{}", c.id, plain(&c.title), plain(&c.column), if c.archived { " (archived)" } else { "" }, c.priority, c.tags.join(", "), c.due.map(|d| d.to_string()).unwrap_or_else(|| "-".into()), c.created_at, c.updated_at, c.description.chars().filter(|c| !c.is_control() || *c == '\n' || *c == '\t').collect::<String>())?;
             }
         }
         Command::Edit(edit) => {
@@ -373,14 +417,14 @@ pub fn run(cli: Cli) -> Result<()> {
                 c.touch();
                 Ok(c.clone())
             })?;
-            result_card(&card, cli.json, "Updated")?;
+            result_card(out, &card, cli.json, "Updated")?;
         }
         Command::Move { id, column } => {
             let card = store.update(|b| {
                 b.move_card(id, &column)?;
                 Ok(b.card(id)?.clone())
             })?;
-            result_card(&card, cli.json, "Moved")?;
+            result_card(out, &card, cli.json, "Moved")?;
         }
         command @ (Command::Archive { .. } | Command::Restore { .. }) => {
             let archived = matches!(command, Command::Archive { .. });
@@ -395,6 +439,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 Ok(c.clone())
             })?;
             result_card(
+                out,
                 &card,
                 cli.json,
                 if archived { "Archived" } else { "Restored" },
@@ -410,16 +455,16 @@ pub fn run(cli: Cli) -> Result<()> {
                 b.cards.retain(|c| c.id != id);
                 Ok(c)
             })?;
-            result_card(&card, cli.json, "Deleted")?;
+            result_card(out, &card, cli.json, "Deleted")?;
         }
         Command::Column { command } => {
             if matches!(command, ColumnCommand::List) {
                 let board = store.read()?;
                 if cli.json {
-                    emit(&board.columns)?;
+                    emit(out, &board.columns)?;
                 } else {
                     for (i, c) in board.columns.iter().enumerate() {
-                        println!("{}. {}", i + 1, c);
+                        writeln!(out, "{}. {}", i + 1, c)?;
                     }
                 }
             } else {
@@ -442,9 +487,9 @@ pub fn run(cli: Cli) -> Result<()> {
                     Ok(b.columns.clone())
                 })?;
                 if cli.json {
-                    emit(&columns)?;
+                    emit(out, &columns)?;
                 } else {
-                    println!("Columns: {}", columns.join(" → "));
+                    writeln!(out, "Columns: {}", columns.join(" → "))?;
                 }
             }
         }
@@ -481,50 +526,55 @@ pub fn run(cli: Cli) -> Result<()> {
                 .count();
             if cli.json {
                 emit(
+                    out,
                     &serde_json::json!({"name": b.name, "active": active.len(), "archived": b.cards.len() - active.len(), "overdue": overdue, "columns": columns, "priorities": priorities}),
                 )?;
             } else {
-                println!(
+                writeln!(
+                    out,
                     "{}: {} active · {} archived · {} overdue",
                     b.name,
                     active.len(),
                     b.cards.len() - active.len(),
                     overdue
-                );
+                )?;
                 for col in &b.columns {
-                    println!("  {col}: {}", columns[col]);
+                    writeln!(out, "  {col}: {}", columns[col])?;
                 }
-                println!(
+                writeln!(
+                    out,
                     "Priorities: {}",
                     priorities
                         .iter()
                         .map(|(k, v)| format!("{k} {v}"))
                         .collect::<Vec<_>>()
                         .join(" · ")
-                );
+                )?;
             }
         }
-        Command::Export => emit(&store.read()?)?,
+        Command::Export => emit(out, &store.read()?)?,
         Command::Import { path, force } => {
             let data =
                 std::fs::read(&path).with_context(|| format!("Cannot read {}", path.display()))?;
             let board: Board = serde_json::from_slice(&data).context("Invalid import JSON")?;
             store.replace(board.clone(), force)?;
             if cli.json {
-                emit(&board)?;
+                emit(out, &board)?;
             } else {
-                println!(
+                writeln!(
+                    out,
                     "Imported {} cards into {}",
                     board.cards.len(),
                     store.path.display()
-                );
+                )?;
             }
         }
     }
     if let Err(error) = recent::remember(&store) {
-        eprintln!(
+        writeln!(
+            err,
             "Warning: board operation succeeded, but recent history was not saved: {error:#}"
-        );
+        )?;
     }
     Ok(())
 }

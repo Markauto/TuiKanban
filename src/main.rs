@@ -1,4 +1,5 @@
 mod cli;
+mod completion;
 mod model;
 mod recent;
 mod store;

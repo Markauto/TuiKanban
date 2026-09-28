@@ -67,8 +67,6 @@ def session(board, quit_key, exercise, startup=False):
         if exercise:
             send(b"b")
             wait_for(lambda: b"Recent" in output)
-            if os.environ.get("KANBAN_CAPTURE"):
-                Path(os.environ["KANBAN_CAPTURE"]).write_bytes(output)
             send(b"n")
             send(b"Switched board\t")
             # Replace the suggested path using Home and Delete.
@@ -76,9 +74,25 @@ def session(board, quit_key, exercise, startup=False):
             other = board.parent / "other.json"
             send(str(other).encode() + b"\r")
             wait_for(lambda: other.exists())
-            send(b"nOther card\x13")
+            send(b':ad\t"Other card" --pri\th\t')
+            if os.environ.get("KANBAN_CAPTURE"):
+                Path(os.environ["KANBAN_CAPTURE"]).write_bytes(output)
+            send(b"\r")
             wait_for(lambda: len(json.loads(other.read_text())["cards"]) == 1)
+            assert json.loads(other.read_text())["cards"][0]["priority"] == "high"
             assert not json.loads(board.read_text())["cards"]
+            send(b':mo\t1 In\t\r')
+            wait_for(lambda: json.loads(other.read_text())["cards"][0]["column"] == "In Progress")
+            send(b"\x1b")
+            send(b':edit 1 --title "Updated Other card" --tags ""\r')
+            wait_for(lambda: json.loads(other.read_text())["cards"][0]["title"] == "Updated Other card")
+            send(b":delete 1\r")
+            wait_for(lambda: b"Permanent" in output and b"--yes;" in output)
+            assert len(json.loads(other.read_text())["cards"]) == 1
+            send(b"\x1b")
+            send(b":stats --json\r")
+            wait_for(lambda: b'"active":' in output)
+            send(b"\x1b")
             send(b"bo" + str(board).encode() + b"\r")
             send(b"n")
             send("Terminal λ".encode())
@@ -138,5 +152,6 @@ with tempfile.TemporaryDirectory(prefix="kanban-pty-") as directory:
     subprocess.run([binary, "--file", str(board), "init", "Terminal test"], check=True, capture_output=True)
     session(board, b"q", True)
     session(board, b"\x03", False)
+    session(board, b":q\r", False)
     session(board, b"q", False, startup=True)
-print("PTY smoke passed: board create/open/switch, startup picker, cards, resize, q/Ctrl+C, terminal restoration")
+print("PTY smoke passed: board create/open/switch, commands, startup picker, cards, resize, q/:q/Ctrl+C, terminal restoration")

@@ -967,6 +967,7 @@ dependencies = [
  "ratatui",
  "serde",
  "serde_json",
+ "shlex",
  "tempfile",
 ]
 

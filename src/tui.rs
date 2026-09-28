@@ -25,7 +25,7 @@ use std::{
 const ACCENT: Color = Color::Cyan;
 const MUTED: Color = Color::DarkGray;
 const BG: Color = Color::Rgb(17, 23, 34);
-const HELP: &str = "NAVIGATE\n  ←/→ or h/l       Select column\n  ↑/↓ or j/k       Select card\n  Home / End       First / last card\n  Enter            View full card (↑/↓ scroll)\n\nCARDS\n  n                New card in selected column\n  e                Edit selected card\n  H / L            Move card left / right\n  p                Cycle priority\n  a                Archive / restore card\n  d                Delete with confirmation\n\nCOLUMNS\n  N / E            Add / rename column\n  [ / ]            Reorder selected column\n  s                Stack below previous / unstack\n  Tab / Shift+Tab  Next / previous column\n\nBOARD\n  b                Create / open / switch boards\n  /                Search ID, text and tags\n  Esc              Clear search / close dialog\n  v                Toggle active / archived cards\n  r                Reload from disk\n  ?                This help\n  q / Ctrl+C       Quit\n\nEDITOR\n  Tab / Shift+Tab  Change field\n  ←/→ or Space     Cycle priority / column\n  ←/→ Home/End     Move text cursor\n  Enter            New line in description\n  Ctrl+S           Save card\n  Esc              Cancel\n\nChanges save immediately. CLI changes refresh automatically.\nExport data and remove columns with `kanban --help`.";
+const HELP: &str = "NAVIGATE\n  ←/→ or h/l       Select column\n  ↑/↓ or j/k       Select card\n  Home / End       First / last card\n  Enter            View full card (↑/↓ scroll)\n\nCARDS\n  n                New card in selected column\n  e                Edit selected card\n  H / L            Move card left / right\n  p                Cycle priority\n  a                Archive / restore card\n  d                Delete with confirmation\n\nCOLUMNS\n  N / E            Add / rename column\n  [ / ]            Reorder selected column\n  s                Stack below previous / unstack\n  Tab / Shift+Tab  Next / previous column\n\nBOARD\n  b                Create / open / switch boards\n  /                Search ID, text and tags\n  Esc              Clear search / close dialog\n  v                Toggle active / archived cards\n  r                Reload from disk\n  :                Run a Kanban command (:help for usage)\n  ?                This help\n  q / Ctrl+C       Quit\n\nEDITOR\n  Tab / Shift+Tab  Change field\n  ←/→ or Space     Cycle priority / column\n  ←/→ Home/End     Move text cursor\n  Enter            New line in description\n  Ctrl+S           Save card\n  Esc              Cancel\n\nChanges save immediately. CLI changes refresh automatically.\nRun CLI commands here with : (for example, :column add Blocked).";
 
 struct TerminalGuard;
 impl Drop for TerminalGuard {
@@ -306,6 +306,11 @@ enum Mode {
     #[default]
     Normal,
     Search,
+    Command(Box<Draft>),
+    CommandOutput {
+        text: String,
+        scroll: u16,
+    },
     Help(u16),
     Detail(u16),
     Edit(Box<Draft>),
@@ -447,6 +452,7 @@ struct App {
     archived: bool,
     mode: Mode,
     status: String,
+    command_selection: usize,
 }
 impl App {
     fn new(board: Board) -> Self {
@@ -458,6 +464,7 @@ impl App {
             archived: false,
             mode: Mode::Normal,
             status: "Ready · changes save automatically".into(),
+            command_selection: 0,
         }
     }
     fn cards(&self, column: usize) -> Vec<&Card> {
@@ -521,6 +528,86 @@ impl App {
                 }
                 self.row = 0;
                 Mode::Search
+            }
+            Mode::Command(mut draft) => match key.code {
+                KeyCode::Esc => Mode::Normal,
+                KeyCode::Up | KeyCode::Down | KeyCode::BackTab | KeyCode::Tab => {
+                    let completion = crate::completion::complete(
+                        &draft.fields[0],
+                        draft.cursors[0],
+                        &self.board,
+                    );
+                    let count = completion.suggestions.len();
+                    if count > 0 {
+                        self.command_selection = self.command_selection.min(count - 1);
+                        match key.code {
+                            KeyCode::Tab => {
+                                completion.apply(
+                                    self.command_selection,
+                                    &mut draft.fields[0],
+                                    &mut draft.cursors[0],
+                                );
+                                self.command_selection = 0;
+                                draft.error.clear();
+                            }
+                            KeyCode::Down => {
+                                self.command_selection = (self.command_selection + 1) % count
+                            }
+                            _ => {
+                                self.command_selection =
+                                    (self.command_selection + count - 1) % count
+                            }
+                        }
+                    }
+                    Mode::Command(draft)
+                }
+                KeyCode::Enter => {
+                    let command = draft.fields[0].trim();
+                    if command.is_empty() {
+                        Mode::Normal
+                    } else if matches!(command, "q" | "quit") {
+                        return Ok(true);
+                    } else {
+                        match crate::cli::run_command_line(command, store) {
+                            Ok(output) => {
+                                if let Err(error) = self.refresh(store) {
+                                    self.status = format!("Reload failed: {error:#}");
+                                }
+                                Mode::CommandOutput {
+                                    text: format!(":{command}\n\n{output}"),
+                                    scroll: 0,
+                                }
+                            }
+                            Err(error) => {
+                                draft.error = format!("{error:#}");
+                                Mode::Command(draft)
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    draft.input(key);
+                    self.command_selection = 0;
+                    draft.error.clear();
+                    Mode::Command(draft)
+                }
+            },
+            Mode::CommandOutput { text, mut scroll } => {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => return Ok(false),
+                    KeyCode::Char(':') => {
+                        self.command_selection = 0;
+                        self.mode = Mode::Command(Box::new(Draft::new(String::new(), None)));
+                        return Ok(false);
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => scroll = scroll.saturating_add(1),
+                    KeyCode::Up | KeyCode::Char('k') => scroll = scroll.saturating_sub(1),
+                    KeyCode::PageDown => scroll = scroll.saturating_add(10),
+                    KeyCode::PageUp => scroll = scroll.saturating_sub(10),
+                    KeyCode::Home => scroll = 0,
+                    _ => {}
+                }
+                Mode::CommandOutput { text, scroll }
             }
             Mode::Help(scroll) => match key.code {
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => Mode::Normal,
@@ -709,6 +796,10 @@ impl App {
             KeyCode::Home => self.row = 0,
             KeyCode::End => self.row = self.cards(self.column).len().saturating_sub(1),
             KeyCode::Char('?') => return Ok(Mode::Help(0)),
+            KeyCode::Char(':') => {
+                self.command_selection = 0;
+                return Ok(Mode::Command(Box::new(Draft::new(String::new(), None))));
+            }
             KeyCode::Char('/') => return Ok(Mode::Search),
             KeyCode::Esc => {
                 self.query.clear();
@@ -922,13 +1013,15 @@ impl App {
         );
         f.render_widget(
             Paragraph::new(
-                " ←↓↑→ navigate  b boards  n/e cards  N/E columns  s stack  [/] reorder  ? help  q quit",
+                " ←↓↑→ navigate  b boards  n/e cards  N/E columns  : command  ? help  q quit",
             )
             .style(Style::default().fg(Color::Gray))
             .wrap(Wrap { trim: true }),
             chunks[3],
         );
         match &self.mode {
+            Mode::Command(draft) => draw_command(f, draft, &self.board, self.command_selection),
+            Mode::CommandOutput { text, scroll } => popup(f, " Command output · ↑/↓ PgUp/PgDn scroll · Esc close ", text, 100, 32, *scroll),
             Mode::Help(scroll) => popup(f, " Keyboard shortcuts · ↑/↓ scroll · Esc close ", HELP, 72, 42, *scroll),
             Mode::Detail(scroll) => if let Some(c) = self.selected() {
                 let text = format!("#{} {}\n\nColumn: {}\nPriority: {}\nTags: {}\nDue: {}\nCreated: {}\nUpdated: {}\n\n{}", c.id, c.title, c.column, c.priority, c.tags.join(", "), c.due.map(|d| d.to_string()).unwrap_or_else(|| "None".into()), c.created_at, c.updated_at, c.description);
@@ -1001,6 +1094,71 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
         height,
     )
 }
+fn draw_command(f: &mut Frame, draft: &Draft, board: &Board, selected: usize) {
+    let completion = crate::completion::complete(&draft.fields[0], draft.cursors[0], board);
+    let area = centered(f.area(), 100, 24);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Kanban command ")
+        .border_style(Style::default().fg(ACCENT))
+        .style(Style::default().bg(BG).fg(Color::White));
+    let inner = block.inner(area);
+    f.render_widget(Clear, area);
+    f.render_widget(block, area);
+    let chunks = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Length(if inner.height > 12 { 3 } else { 1 }),
+        Constraint::Min(1),
+        Constraint::Length(if draft.error.is_empty() { 0 } else { 3 }),
+        Constraint::Length(2),
+    ])
+    .split(inner);
+    f.render_widget(
+        Paragraph::new(format!(":{}", draft.displayed(0)))
+            .style(Style::default().fg(ACCENT))
+            .wrap(Wrap { trim: false }),
+        chunks[0],
+    );
+    f.render_widget(
+        Paragraph::new(clean(&completion.hint))
+            .style(Style::default().fg(Color::Gray))
+            .wrap(Wrap { trim: false }),
+        chunks[1],
+    );
+    if completion.suggestions.is_empty() {
+        f.render_widget(
+            Paragraph::new("No suggestions · type a value or use --help")
+                .wrap(Wrap { trim: false }),
+            chunks[2],
+        );
+    } else {
+        let items: Vec<_> = completion
+            .suggestions
+            .iter()
+            .map(|item| ListItem::new(clean(&format!("{}  {}", item.value, item.description))))
+            .collect();
+        let mut state = ListState::default().with_selected(Some(selected.min(items.len() - 1)));
+        f.render_stateful_widget(
+            List::new(items)
+                .highlight_symbol("› ")
+                .highlight_style(Style::default().bg(Color::DarkGray).fg(ACCENT)),
+            chunks[2],
+            &mut state,
+        );
+    }
+    f.render_widget(
+        Paragraph::new(clean(&draft.error))
+            .style(Style::default().fg(Color::Red))
+            .wrap(Wrap { trim: false }),
+        chunks[3],
+    );
+    f.render_widget(
+        Paragraph::new("↑/↓ select · Tab complete\nEnter run · Esc cancel")
+            .style(Style::default().fg(ACCENT)),
+        chunks[4],
+    );
+}
+
 fn popup(f: &mut Frame, title: &str, text: &str, width: u16, height: u16, scroll: u16) {
     let area = centered(f.area(), width, height);
     f.render_widget(Clear, area);
@@ -1281,6 +1439,161 @@ mod tests {
             assert!(text.contains(if width < 30 { "Terminal" } else { "KANBAN" }));
         }
     }
+    #[test]
+    fn command_prompt_edits_cancels_and_recovers_from_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("board.json"));
+        store.init(board()).unwrap();
+        let original = std::fs::read(&store.path).unwrap();
+        let mut app = App::new(store.read().unwrap());
+        let press = |app: &mut App, code| {
+            app.key(KeyEvent::new(code, KeyModifiers::NONE), &store)
+                .unwrap()
+        };
+        press(&mut app, KeyCode::Char(':'));
+        for c in "add λ".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        press(&mut app, KeyCode::Left);
+        press(&mut app, KeyCode::Delete);
+        if let Mode::Command(draft) = &app.mode {
+            assert_eq!(draft.fields[0], "add ");
+        } else {
+            panic!("Expected command prompt");
+        }
+        press(&mut app, KeyCode::Esc);
+        assert!(matches!(app.mode, Mode::Normal));
+        for command in [
+            "bogus",
+            "tui",
+            "add \"unfinished",
+            "delete 1",
+            "add x --file elsewhere.json",
+        ] {
+            press(&mut app, KeyCode::Char(':'));
+            for c in command.chars() {
+                press(&mut app, KeyCode::Char(c));
+            }
+            press(&mut app, KeyCode::Enter);
+            if let Mode::Command(draft) = &app.mode {
+                assert_eq!(draft.fields[0], command);
+                assert!(!draft.error.is_empty());
+            } else {
+                panic!("Expected editable error for {command}");
+            }
+            press(&mut app, KeyCode::Home);
+            for _ in command.chars() {
+                press(&mut app, KeyCode::Delete);
+            }
+            for c in "help".chars() {
+                press(&mut app, KeyCode::Char(c));
+            }
+            press(&mut app, KeyCode::Enter);
+            assert!(
+                matches!(&app.mode, Mode::CommandOutput { text, .. } if text.contains("Usage:"))
+            );
+            press(&mut app, KeyCode::PageDown);
+            assert!(matches!(app.mode, Mode::CommandOutput { scroll: 10, .. }));
+            press(&mut app, KeyCode::Enter);
+        }
+        assert_eq!(std::fs::read(&store.path).unwrap(), original);
+        press(&mut app, KeyCode::Char(':'));
+        press(&mut app, KeyCode::Enter);
+        assert!(matches!(app.mode, Mode::Normal));
+        press(&mut app, KeyCode::Char(':'));
+        assert!(app
+            .key(
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                &store
+            )
+            .unwrap());
+    }
+
+    #[test]
+    fn command_suggestions_select_complete_and_cancel_without_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("board.json"));
+        store.init(board()).unwrap();
+        let original = std::fs::read(&store.path).unwrap();
+        let mut app = App::new(store.read().unwrap());
+        let press = |app: &mut App, code| {
+            app.key(KeyEvent::new(code, KeyModifiers::NONE), &store)
+                .unwrap();
+        };
+        press(&mut app, KeyCode::Char(':'));
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.command_selection, 1);
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.command_selection, 0);
+        for c in "col".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        press(&mut app, KeyCode::Tab);
+        if let Mode::Command(draft) = &app.mode {
+            assert_eq!(draft.fields[0], "column ");
+        } else {
+            panic!("Expected command prompt");
+        }
+        for c in "ren".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        press(&mut app, KeyCode::Tab);
+        // Board values come first; the second column is Doing.
+        press(&mut app, KeyCode::Down);
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(text.contains("› Doing"));
+        assert!(text.contains("Tab complete"));
+        press(&mut app, KeyCode::Tab);
+        if let Mode::Command(draft) = &app.mode {
+            assert_eq!(draft.fields[0], "column rename Doing ");
+        } else {
+            panic!("Expected command prompt");
+        }
+        assert_eq!(std::fs::read(&store.path).unwrap(), original);
+        press(&mut app, KeyCode::Esc);
+        assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn renders_command_prompt_and_output_at_small_sizes() {
+        let mut app = App::new(board());
+        for (width, height) in [(100, 35), (35, 12), (10, 5)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            for mode in [
+                Mode::Command(Box::new(Draft::new(String::new(), None))),
+                Mode::CommandOutput {
+                    text: "Added #1: Release [Todo]".into(),
+                    scroll: 0,
+                },
+            ] {
+                app.mode = mode;
+                terminal.draw(|f| app.draw(f)).unwrap();
+                let text: String = terminal
+                    .backend()
+                    .buffer()
+                    .content
+                    .iter()
+                    .map(|c| c.symbol())
+                    .collect();
+                if width >= 30 {
+                    assert!(text.contains(if matches!(app.mode, Mode::Command(_)) {
+                        "Kanban command"
+                    } else {
+                        "Command output"
+                    }));
+                }
+            }
+        }
+    }
+
     #[test]
     fn keyboard_create_move_archive_and_search() {
         let dir = tempfile::tempdir().unwrap();
